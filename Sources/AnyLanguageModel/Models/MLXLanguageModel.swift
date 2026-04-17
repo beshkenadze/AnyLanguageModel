@@ -12,11 +12,76 @@ import Foundation
 
 #if MLX
     import JSONSchema
+    import Hub
     import MLXLMCommon
     import MLX
     import MLXVLM
     import Tokenizers
-    import Hub
+
+    private struct SwiftTransformersDownloader: MLXLMCommon.Downloader {
+        let hub: HubApi
+
+        func download(
+            id: String,
+            revision: String?,
+            matching patterns: [String],
+            useLatest: Bool,
+            progressHandler: @Sendable @escaping (Progress) -> Void
+        ) async throws -> URL {
+            _ = useLatest
+            return try await hub.snapshot(
+                from: Hub.Repo(id: id),
+                revision: revision ?? "main",
+                matching: patterns,
+                progressHandler: progressHandler
+            )
+        }
+    }
+
+    private struct SwiftTransformersTokenizerLoader: MLXLMCommon.TokenizerLoader {
+        let hub: HubApi
+
+        func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
+            let tokenizer = try await AutoTokenizer.from(modelFolder: directory, hubApi: hub)
+            return SwiftTransformersTokenizer(tokenizer: tokenizer)
+        }
+    }
+
+    private struct SwiftTransformersTokenizer: MLXLMCommon.Tokenizer {
+        let tokenizer: any Tokenizers.Tokenizer
+
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+            tokenizer.encode(text: text, addSpecialTokens: addSpecialTokens)
+        }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            tokenizer.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens)
+        }
+
+        func convertTokenToId(_ token: String) -> Int? {
+            tokenizer.convertTokenToId(token)
+        }
+
+        func convertIdToToken(_ id: Int) -> String? {
+            tokenizer.convertIdToToken(id)
+        }
+
+        var bosToken: String? { tokenizer.bosToken }
+        var eosToken: String? { tokenizer.eosToken }
+        var unknownToken: String? { tokenizer.unknownToken }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] {
+            try tokenizer.applyChatTemplate(
+                messages: messages,
+                tools: tools,
+                additionalContext: additionalContext
+            )
+        }
+    }
 
     /// Wrapper to store model availability state in NSCache.
     private final class CachedModelState: NSObject, @unchecked Sendable {
@@ -677,13 +742,19 @@ import Foundation
         /// Get or load model context with caching
         private func loadContext(modelId: String, hub: HubApi?, directory: URL?) async throws -> ModelContext {
             let key = directory?.absoluteString ?? modelId
+            let hub = hub ?? .shared
 
             return try await modelCache.context(for: key) {
+                let tokenizerLoader = SwiftTransformersTokenizerLoader(hub: hub)
                 if let directory {
-                    return try await loadModel(directory: directory)
+                    return try await loadModel(from: directory, using: tokenizerLoader)
                 }
 
-                return try await loadModel(hub: hub ?? HubApi(), id: modelId)
+                return try await loadModel(
+                    from: SwiftTransformersDownloader(hub: hub),
+                    using: tokenizerLoader,
+                    id: modelId
+                )
             }
         }
 
@@ -840,13 +911,13 @@ import Foundation
             GPUMemoryManager.shared.markIdle(scope: id)
         }
 
-        private func mlxToolSpecs(for session: LanguageModelSession) -> [ToolSpec]? {
+        private func mlxToolSpecs(for session: LanguageModelSession) -> [MLXLMCommon.ToolSpec]? {
             session.tools.isEmpty ? nil : session.tools.map { convertToolToMLXSpec($0) }
         }
 
         private func makeUserInput(
             chat: [MLXLMCommon.Chat.Message],
-            tools: [ToolSpec]?,
+            tools: [MLXLMCommon.ToolSpec]?,
             processing: MLXLMCommon.UserInput.Processing = .init(resize: nil),
             additionalContext: [String: any Sendable]? = nil
         ) -> MLXLMCommon.UserInput {
@@ -1353,7 +1424,7 @@ import Foundation
 
     // MARK: - Tool Conversion
 
-    private func convertToolToMLXSpec(_ tool: any Tool) -> ToolSpec {
+    private func convertToolToMLXSpec(_ tool: any Tool) -> MLXLMCommon.ToolSpec {
         // Convert AnyLanguageModel's GenerationSchema to JSON-compatible dictionary
         let parametersDict: [String: any Sendable]
         do {
@@ -1375,7 +1446,7 @@ import Foundation
             "parameters": parametersDict,
         ]
 
-        let toolSpec: ToolSpec = [
+        let toolSpec: MLXLMCommon.ToolSpec = [
             "type": "function",
             "function": functionSpec,
         ]
@@ -1714,7 +1785,7 @@ import Foundation
 
     private struct MLXTokenBackend: TokenBackend {
         let model: any MLXLMCommon.LanguageModel
-        let tokenizer: any Tokenizer
+        let tokenizer: any MLXLMCommon.Tokenizer
         var state: MLXLMCommon.LMOutput.State?
         var cache: [MLXLMCommon.KVCache]
         var processor: MLXLMCommon.LogitProcessor?
@@ -1795,7 +1866,7 @@ import Foundation
 
         private static func buildEndTokens(
             eosTokenId: Int,
-            tokenizer: any Tokenizer,
+            tokenizer: any MLXLMCommon.Tokenizer,
             configuration: ModelConfiguration
         ) -> Set<Int> {
             var tokens: Set<Int> = [eosTokenId]
@@ -1816,13 +1887,13 @@ import Foundation
 
         func isSpecialToken(_ token: Int) -> Bool {
             // Use swift-transformers' own special token registry (skipSpecialTokens) instead of guessing.
-            let raw = tokenizer.decode(tokens: [token], skipSpecialTokens: false)
+            let raw = tokenizer.decode(tokenIds: [token], skipSpecialTokens: false)
             guard !raw.isEmpty else { return false }
-            let filtered = tokenizer.decode(tokens: [token], skipSpecialTokens: true)
+            let filtered = tokenizer.decode(tokenIds: [token], skipSpecialTokens: true)
             return filtered.isEmpty
         }
 
-        private static func buildTokensExcludedFromRepetitionPenalty(tokenizer: any Tokenizer) -> Set<Int> {
+        private static func buildTokensExcludedFromRepetitionPenalty(tokenizer: any MLXLMCommon.Tokenizer) -> Set<Int> {
             let excludedTexts = ["{", "}", "[", "]", ",", ":", "\""]
             var excluded = Set<Int>()
             excluded.reserveCapacity(excludedTexts.count * 2)
@@ -1842,7 +1913,7 @@ import Foundation
         }
 
         func tokenText(_ token: Int) -> String? {
-            let decoded = tokenizer.decode(tokens: [token], skipSpecialTokens: false)
+            let decoded = tokenizer.decode(tokenIds: [token], skipSpecialTokens: false)
             return decoded.isEmpty ? nil : decoded
         }
 
