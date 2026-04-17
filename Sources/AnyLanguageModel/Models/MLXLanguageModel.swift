@@ -28,6 +28,7 @@ import Foundation
             useLatest: Bool,
             progressHandler: @Sendable @escaping (Progress) -> Void
         ) async throws -> URL {
+            // `HubApi.snapshot` has no cache-only mode, so this adapter cannot honor `useLatest`.
             _ = useLatest
             return try await hub.snapshot(
                 from: Hub.Repo(id: id),
@@ -742,7 +743,7 @@ import Foundation
         /// Get or load model context with caching
         private func loadContext(modelId: String, hub: HubApi?, directory: URL?) async throws -> ModelContext {
             let key = directory?.absoluteString ?? modelId
-            let hub = hub ?? .shared
+            let hub = hub ?? HubApi()
 
             return try await modelCache.context(for: key) {
                 let tokenizerLoader = SwiftTransformersTokenizerLoader(hub: hub)
