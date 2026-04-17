@@ -146,9 +146,9 @@ dependencies: [
 >         from: "0.8.0",
 >         traits: ["CoreML", "MLX", "Llama"]
 >     ),
->     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"), // CoreML
->     .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "2.25.5"),       // MLX
->     .package(url: "https://github.com/mattt/llama.swift", from: "2.0.0"),              // Llama
+>     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.0.0"),     // CoreML
+>     .package(url: "https://github.com/ml-explore/mlx-swift-lm", "2.25.5"..<"4.0.0"),      // MLX
+>     .package(url: "https://github.com/mattt/llama.swift", from: "2.0.0"),                  // Llama
 > ]
 > ```
 >
